@@ -1,60 +1,10 @@
 #ifndef RNG_H_
 #define RNG_H_
 
-// __________________________________________________________________________
-// CAUTIONS:
-
-// 1. Some of this code might not work correctly on 64-bit machines.  I
-// have hacked the 32 bit version try and make it work, but the 64-bit
-// version is not extensively tested.
-//
-// 2. This generator should NOT be used as in the following line.
-// for (int i = 0; i < 100; ++i) { RNG x; cout << x.uniform() << endl; }
-// The problem is that each time through the loop, a new RNG 'x' is
-// created, and that RNG is used to generate exactly one random number.
-// While the results may be satisfactory, the class is designed to
-// produce quality random numbers by having a single (or a few) RNGs
-// called repeatedly.
-// The better way to do the above loop is:
-// RNG x; for (int i = 0; i < 100; ++i) { cout << x.uniform() << endl; }
-
-// __________________________________________________________________________
-// This C++ code uses the simple, fast "KISS" (Keep It Simple Stupid)
-// random number generator suggested by George Marsaglia in a Usenet
-// posting from 1999.  He describes it as "one of my favorite
-// generators".  It generates high-quality random numbers that
-// apparently pass all commonly used tests for randomness.  In fact, it
-// generates random numbers by combining the results of three simple
-// random number generators that have different periods and are
-// constructed from completely different algorithms.  It does not have
-// the ultra-long period of some other generators - a "problem" that can
-// be fixed fairly easily - but that seems to be its only potential
-// problem.  The period is about 2^123.
-
-// The KISS algorithm is only used directly in the function rand_int32.
-// rand_int32 is then used (directly or indirectly) by every other
-// member function of the class that generates random numbers.  For
-// faster random numbers, one can redefine rand_int32 to return either
-// WMC(), CONG(), or SHR3().  The speed will be two to three times
-// faster, and the quality of the random numbers should be  sufficient
-// for many purposes.  The three alternatives are comparable in terms of
-// both speed and quality.
-
-// The ziggurat method of Marsaglia is used to generate exponential and
-// normal variates.  The method as well as source code can be found in
-// the article "The Ziggurat Method for Generating Random Variables" by
-// Marsaglia and Tsang, Journal of Statistical Software 5, 2000.
-
-// The method for generating gamma variables appears in "A Simple Method
-// for Generating Gamma Variables" by Marsaglia and Tsang, ACM
-// Transactions on Mathematical Software, Vol. 26, No 3, Sep 2000, pages
-// 363-372.
-// __________________________________________________________________________
-
+#include <climits>
+#include <cmath>
 #include <cstdlib>
 #include <ctime>
-#include <cmath>
-#include <climits>
 #include <vector>
 
 namespace rng_h {
@@ -191,28 +141,39 @@ class RNG {
   double beta(double a1, double a2)
     { const double x1 = gamma(a1, 1); return (x1 / (x1 + gamma(a2, 1))); }
 
-  void uniform(std::vector<double>& res, double x = 0.0, double y = 1.0) {
-    for (std::vector<double>::iterator i = res.begin(); i != res.end(); ++i)
+  void uniform(std::vector<double>* res, double x = 0.0, double y = 1.0) {
+    for (auto i = res->begin(); i != res->end(); ++i)
       *i = uniform(x, y);
   }
-  void normal(std::vector<double>& res, double mu = 0.0, double sd = 1.0) {
-    for (std::vector<double>::iterator i = res.begin(); i != res.end(); ++i)
+  void normal(std::vector<double>* res, double mu = 0.0, double sd = 1.0) {
+    for (auto i = res->begin(); i != res->end(); ++i)
       *i = normal(mu, sd);
   }
-  void exponential(std::vector<double>& res, double lambda = 1) {
-    for (std::vector<double>::iterator i = res.begin(); i != res.end(); ++i)
+  std::vector<double> normal_sample(
+      size_t size, double mu = 0.0, double sd = 1.0) {
+    std::vector<double> res(size);
+    normal(&res, mu, sd);
+    return res;
+  }
+  void exponential(std::vector<double>* res, double lambda = 1) {
+    for (auto i = res->begin(); i != res->end(); ++i)
       *i = exponential(lambda);
   }
-  void gamma(std::vector<double>& res, double shape = 1, double scale = 1) {
-    for (std::vector<double>::iterator i = res.begin(); i != res.end(); ++i)
+  std::vector<double> exponential_sample(size_t size, double lambda = 1) {
+    std::vector<double> res(size);
+    exponential(&res, lambda);
+    return res;
+  }
+  void gamma(std::vector<double>* res, double shape = 1, double scale = 1) {
+    for (auto i = res->begin(); i != res->end(); ++i)
       *i = gamma(shape, scale);
   }
-  void chi_square(std::vector<double>& res, double df) {
-    for (std::vector<double>::iterator i = res.begin(); i != res.end(); ++i)
+  void chi_square(std::vector<double>* res, double df) {
+    for (auto i = res->begin(); i != res->end(); ++i)
       *i = chi_square(df);
   }
-  void beta(std::vector<double>& res, double a1, double a2) {
-    for (std::vector<double>::iterator i = res.begin(); i != res.end(); ++i)
+  void beta(std::vector<double>* res, double a1, double a2) {
+    for (auto i = res->begin(); i != res->end(); ++i)
       *i = beta(a1, a2);
   }
 
@@ -220,15 +181,15 @@ class RNG {
   int poisson(double mu);
   int binomial(double p, int n);
   void multinom(unsigned int n, const std::vector<double>& probs,
-      std::vector<uint>& samp);
+                std::vector<uint>& samp);
   void multinom(unsigned int n, const double* prob, uint K, uint* samp);
 
-  void poisson(std::vector<int>& res, double lambda) {
-    for (std::vector<int>::iterator i = res.begin(); i != res.end(); ++i)
+  void poisson(std::vector<int>* res, double lambda) {
+    for (auto i = res->begin(); i != res->end(); ++i)
       *i = poisson(lambda);
   }
-  void binomial(std::vector<int>& res, double p, int n) {
-    for (std::vector<int>::iterator i = res.begin(); i != res.end(); ++i)
+  void binomial(std::vector<int>* res, double p, int n) {
+    for (auto i = res->begin(); i != res->end(); ++i)
       *i = binomial(p, n);
   }
 };  // class RNG
