@@ -1,0 +1,4 @@
+*.o
+bazel*
+.smb*
+tmp/
