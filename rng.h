@@ -194,7 +194,6 @@ class RNG {
   }
 };  // class RNG
 
-};  // namespace rng_h
+}  // namespace rng_h
 
 #endif  // RNG_H_
-
