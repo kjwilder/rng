@@ -3,13 +3,12 @@
 #include "rng.h"
 
 using rng_h::RNG;
-using rng_h::ulong;
 
 // _______________________________________________________________________
 // Initialize the static component of RNG
 
-ulong RNG::tm = 1234567;
-ulong RNG::kn[128], RNG::ke[256];
+uint_fast32_t RNG::tm = 1234567;
+uint_fast32_t RNG::kn[128], RNG::ke[256];
 double RNG::wn[128], RNG::fn[128], RNG::we[256], RNG::fe[256];
 
 // _______________________________________________________________________
@@ -17,7 +16,7 @@ double RNG::wn[128], RNG::fn[128], RNG::we[256], RNG::fe[256];
 // nfix() generates variates after rejection in RNOR.
 // Despite rejection, this method is faster than Box-Muller.
 
-double RNG::nfix(slong h, ulong i) {
+double RNG::nfix(int_fast32_t h, uint_fast32_t i) {
   const double r = 3.442620;  // The start of the right tail
 
   double x, y;
@@ -25,10 +24,10 @@ double RNG::nfix(slong h, ulong i) {
     x = h * wn[i];
     if (i == 0) {  // Handle the base strip.
       do {
-        x = -log(rand_open01()) * 0.2904764;  // .2904764 is 1/r
+        x = -log(rand_open01()) / r;
         y = -log(rand_open01());
       } while (y + y < x * x);
-      return ((h > 0) ? r + x : -r - x);
+      return (h > 0) ? r + x : -r - x;
     }
 
     // Handle the wedges of other strips.
@@ -40,7 +39,7 @@ double RNG::nfix(slong h, ulong i) {
     h = UL32toSL32(rand_int32());
     i = h & 127;
     if (ULONG32(std::abs(h)) < kn[i]) {
-      return (h * wn[i]);
+      return h * wn[i];
     }
   }
 }  // RNG::nfix
@@ -49,10 +48,10 @@ double RNG::nfix(slong h, ulong i) {
 // RNG::REXP generates exponential variates with rejection.
 // efix() generates variates after rejection in REXP.
 
-double RNG::efix(ulong j, ulong i) {
+double RNG::efix(uint_fast32_t j, uint_fast32_t i) {
   for (;;) {
     if (i == 0) {
-      return (7.69711 - log(rand_open01()));
+      return 7.69711 - log(rand_open01());
     }
 
     const double x = j * we[i];
@@ -63,7 +62,7 @@ double RNG::efix(ulong j, ulong i) {
     j = rand_int32();
     i = (j & 255);
     if (j < ke[i]) {
-      return (j * we[i]);
+      return j * we[i];
     }
   }
 }  // RNG::efix
@@ -89,7 +88,7 @@ void RNG::zigset() {
   wn[127] = tn / m1;
   fn[0] = 1.0;
   fn[127] = exp(-.5 * tn * tn);
-  for (uint i = 126; i > 0; i--) {
+  for (auto i = 126; i > 0; i--) {
     const double dn = sqrt(-2 * log(vn / tn + exp(-.5 * tn * tn)));
     kn[i + 1] = ULONG32((dn / tn) * m1);
     fn[i] = exp(-.5 * dn * dn);
@@ -108,7 +107,7 @@ void RNG::zigset() {
   we[255] = te / m2;
   fe[0] = 1.0;
   fe[255] = exp(-te);
-  for (uint i = 254; i > 0; i--) {
+  for (auto i = 254; i > 0; i--) {
     const double de = -log(ve / te + exp(-te));
     ke[i+1] = ULONG32((de / te) * m2);
     fe[i] = exp(-de);
@@ -137,10 +136,10 @@ double RNG::gamma(double shape, double scale) {
     const double u = rand_open01();
     const double x2 = x * x;
     if (u < 1.0 - 0.0331 * x2 * x2) {
-      return (d * v / scale);
+      return d * v / scale;
     }
     if (log(u) < 0.5 * x2 + d * (1.0 - v + log(v))) {
-      return (d * v / scale);
+      return d * v / scale;
     }
   }
 }  // RNG::gamma
@@ -166,7 +165,8 @@ int RNG::poisson(double mu) {
   static double big_l;/* integer "w/o overflow" */
   static double muprev = 0.0, muprev2 = 0.0;/*, muold     = 0.0*/
 
-  double del, difmuk = 0.0, E = 0.0, fk = 0.0, fx, fy, g, px, py, t, u = 0.0, v, x;
+  double del, difmuk = 0.0, E = 0.0, fk = 0.0;
+  double fx, fy, g, px, py, t, u = 0.0, v, x;
   int pois = -1;
   int k, kflag, big_mu, new_big_mu = 0;
 
@@ -239,7 +239,7 @@ int RNG::poisson(double mu) {
 
   if (new_big_mu || mu != muprev2) {
     muprev2 = mu;
-    omega = 1.0 / (sqrt(2.0 * PI) * s);
+    omega = 1.0 / (sqrt(2.0 * M_PI) * s);
     b1 = one_24 / mu;
     b2 = 0.3 * b1 * b1;
     c3 = one_7 * b1 * b2;
@@ -277,7 +277,7 @@ Step_F:
         } else {
           px = fk * log(1.0 + v) - difmuk - del;
         }
-        py = 1.0 / (sqrt(2.0 * PI) * sqrt(fk));
+        py = 1.0 / (sqrt(2.0 * M_PI) * sqrt(fk));
       }
       x = (0.5 - difmuk) / s;
       x *= x;/* x^2 */
@@ -455,17 +455,18 @@ finish:
 // Generate a sample of size 'n' from a multinomial distribution with
 // probabilities given in 'probs'.  Inspired by R source code.
 
-void RNG::multinom(
-    uint n, const std::vector<double>& probs, std::vector<uint>& samp) {
-  samp.resize(probs.size());
-  RNG::multinom(n, &probs[0], (uint) probs.size(), &samp[0]);
+void RNG::multinom(unsigned int n, const std::vector<double>* probs,
+    std::vector<unsigned int>* samp) {
+  samp->resize(probs->size());
+  RNG::multinom(n, &((*probs)[0]), (unsigned int) probs->size(), &((*samp)[0]));
 }
 
-void RNG::multinom(uint size, const double* probs, uint num_probs, uint* samp) {
+void RNG::multinom(unsigned int size, const double* probs,
+    unsigned int num_probs, unsigned int* samp) {
   if (num_probs == 0) {
     return;
   }
-  for (uint i = 0; i < num_probs; i++) {
+  for (auto i = 0; i < num_probs; i++) {
     samp[i] = 0;
   }
   if (size == 0) {
@@ -474,18 +475,16 @@ void RNG::multinom(uint size, const double* probs, uint num_probs, uint* samp) {
 
   std::vector<double> fixed_probs(num_probs);
   double total_prob = 0.0;
-  for (uint i = 0; i < num_probs; i++) {
+  for (auto i = 0; i < num_probs; i++) {
     const double pp = probs[i];
     if ((pp == pp) && pp >= 0) {  // if (std::isfinite(pp) && pp >= 0)
       total_prob += (fixed_probs[i] = pp);
     }
   }
-
   if (total_prob == 0.0) {
     return;
   }
-
-  for (uint i = 0; i < num_probs-1; i++) {
+  for (auto i = 0; i < num_probs-1; i++) {
     if (fixed_probs[i] > 0.0) {
       samp[i] = binomial(fixed_probs[i] / total_prob, size);
       size -= samp[i];
