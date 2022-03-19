@@ -78,7 +78,7 @@ void RNG::zigset() {
   inited = true;
 
   // Set up tables for RNOR
-  const double m1 = 2147483648.0;  // 2^31
+  const double m1 = 1u << 31;
   const double vn = 9.91256303526217e-3;
   double tn = 3.442619855899;
   double q = vn / exp(-.5 * tn * tn);
