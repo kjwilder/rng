@@ -8,5 +8,5 @@ cc_test(
   name = "rng_test",
   size = "small",
   srcs = ["rng.h", "tests/rng_test.cc"],
-  deps = [":rng", "@gtest//:gtest_main"],
+  deps = [":rng", "@googletest//:gtest_main"],
 )
