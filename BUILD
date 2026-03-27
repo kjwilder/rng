@@ -7,8 +7,14 @@ cc_library(
 )
 
 cc_test(
-  name = "rng_test",
-  size = "small",
-  srcs = ["rng.h", "tests/rng_test.cc"],
-  deps = [":rng", "@googletest//:gtest_main"],
+    name = "rng_test",
+    size = "small",
+    srcs = [
+        "rng.h",
+        "tests/rng_test.cc",
+    ],
+    deps = [
+        ":rng",
+        "@googletest//:gtest_main",
+    ],
 )
