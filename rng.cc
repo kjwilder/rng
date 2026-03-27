@@ -1,5 +1,5 @@
 #include <cmath>
-#include <iostream>
+#include <mutex>
 #include "rng.h"
 
 using rng_h::RNG;
@@ -8,7 +8,7 @@ using rng_h::ulong;
 // _______________________________________________________________________
 // Initialize the static component of RNG
 
-ulong RNG::tm = 1234567;
+std::atomic<ulong> RNG::tm{1234567};
 ulong RNG::kn[128], RNG::ke[256];
 double RNG::wn[128], RNG::fn[128], RNG::we[256], RNG::fe[256];
 
@@ -72,49 +72,46 @@ double RNG::efix(ulong j, ulong i) {
 // This procedure creates the tables used by RNOR and REXP
 
 void RNG::zigset() {
-  static bool inited = false;
-  if (inited) {
-    return;
-  }
-  inited = true;
+  static std::once_flag flag;
+  std::call_once(flag, []() {
+    // Set up tables for RNOR
+    const double m1 = 2147483648.0;  // 2^31
+    const double vn = 9.91256303526217e-3;
+    double tn = 3.442619855899;
+    double q = vn / exp(-.5 * tn * tn);
+    kn[0] = ULONG32((tn / q) * m1);
+    kn[1] = 0;
+    wn[0] = q / m1;
+    wn[127] = tn / m1;
+    fn[0] = 1.0;
+    fn[127] = exp(-.5 * tn * tn);
+    for (uint i = 126; i > 0; i--) {
+      const double dn = sqrt(-2 * log(vn / tn + exp(-.5 * tn * tn)));
+      kn[i + 1] = ULONG32((dn / tn) * m1);
+      fn[i] = exp(-.5 * dn * dn);
+      wn[i] = dn / m1;
+      tn = dn;
+    }
 
-  // Set up tables for RNOR
-  const double m1 = 2147483648.0;  // 2^31
-  const double vn = 9.91256303526217e-3;
-  double tn = 3.442619855899;
-  double q = vn / exp(-.5 * tn * tn);
-  kn[0] = ULONG32((tn / q) * m1);
-  kn[1] = 0;
-  wn[0] = q / m1;
-  wn[127] = tn / m1;
-  fn[0] = 1.0;
-  fn[127] = exp(-.5 * tn * tn);
-  for (uint i = 126; i > 0; i--) {
-    const double dn = sqrt(-2 * log(vn / tn + exp(-.5 * tn * tn)));
-    kn[i + 1] = ULONG32((dn / tn) * m1);
-    fn[i] = exp(-.5 * dn * dn);
-    wn[i] = dn / m1;
-    tn = dn;
-  }
-
-  // Set up tables for REXP
-  const double m2 = 4294967296.0;  // 2^32
-  const double ve = 3.949659822581572e-3;
-  double te = 7.697117470131487;
-  q = ve / exp(-te);
-  ke[0] = ULONG32((te / q) * m2);
-  ke[1] = 0;
-  we[0] = q / m2;
-  we[255] = te / m2;
-  fe[0] = 1.0;
-  fe[255] = exp(-te);
-  for (uint i = 254; i > 0; i--) {
-    const double de = -log(ve / te + exp(-te));
-    ke[i+1] = ULONG32((de / te) * m2);
-    fe[i] = exp(-de);
-    we[i] = de / m2;
-    te = de;
-  }
+    // Set up tables for REXP
+    const double m2 = 4294967296.0;  // 2^32
+    const double ve = 3.949659822581572e-3;
+    double te = 7.697117470131487;
+    q = ve / exp(-te);
+    ke[0] = ULONG32((te / q) * m2);
+    ke[1] = 0;
+    we[0] = q / m2;
+    we[255] = te / m2;
+    fe[0] = 1.0;
+    fe[255] = exp(-te);
+    for (uint i = 254; i > 0; i--) {
+      const double de = -log(ve / te + exp(-te));
+      ke[i+1] = ULONG32((de / te) * m2);
+      fe[i] = exp(-de);
+      we[i] = de / m2;
+      te = de;
+    }
+  });
 }  // RNG::zigset
 
 // __________________________________________________________________________
@@ -159,12 +156,26 @@ int RNG::poisson(double mu) {
   const double fact[10] =
     { 1.0, 1.0, 2., 6., 24., 120.0, 720.0, 5040.0, 40320.0, 362880.0 };
 
-  static int l, m;
-
-  static double b1, b2, c, c0, c1, c2, c3;
-  static double pp[36], p0, p, q, s, d, omega;
-  static double big_l;/* integer "w/o overflow" */
-  static double muprev = 0.0, muprev2 = 0.0;/*, muold     = 0.0*/
+  // Use per-instance state (avoids cross-instance corruption with multiple RNGs).
+  int& l = poisson_state_.l;
+  int& m = poisson_state_.m;
+  double& b1 = poisson_state_.b1;
+  double& b2 = poisson_state_.b2;
+  double& c = poisson_state_.c;
+  double& c0 = poisson_state_.c0;
+  double& c1 = poisson_state_.c1;
+  double& c2 = poisson_state_.c2;
+  double& c3 = poisson_state_.c3;
+  double* pp = poisson_state_.pp;
+  double& p0 = poisson_state_.p0;
+  double& p = poisson_state_.p;
+  double& q = poisson_state_.q;
+  double& s = poisson_state_.s;
+  double& d = poisson_state_.d;
+  double& omega = poisson_state_.omega;
+  double& big_l = poisson_state_.big_l;
+  double& muprev = poisson_state_.muprev;
+  double& muprev2 = poisson_state_.muprev2;
 
   double del, difmuk = 0.0, E = 0.0, fk = 0.0, fx, fy, g, px, py, t, u = 0.0, v, x;
   int pois = -1;
@@ -301,10 +312,23 @@ Step_F:
 // ACM Algorithm 678 BTPEC converted to C.
 
 int RNG::binomial(double pp, int n) {
-  static double c, fm, npq, p1, p2, p3, p4, qn, xl, xll, xlr, xm, xr;
-
-  static double psave = -1.0;
-  static int nsave = -1, m = 0;
+  // Use per-instance state (avoids cross-instance corruption with multiple RNGs).
+  double& c = binomial_state_.c;
+  double& fm = binomial_state_.fm;
+  double& npq = binomial_state_.npq;
+  double& p1 = binomial_state_.p1;
+  double& p2 = binomial_state_.p2;
+  double& p3 = binomial_state_.p3;
+  double& p4 = binomial_state_.p4;
+  double& qn = binomial_state_.qn;
+  double& xl = binomial_state_.xl;
+  double& xll = binomial_state_.xll;
+  double& xlr = binomial_state_.xlr;
+  double& xm = binomial_state_.xm;
+  double& xr = binomial_state_.xr;
+  double& psave = binomial_state_.psave;
+  int& nsave = binomial_state_.nsave;
+  int& m = binomial_state_.m;
 
   double f, x;
 
@@ -476,7 +500,7 @@ void RNG::multinom(uint size, const double* probs, uint num_probs, uint* samp) {
   double total_prob = 0.0;
   for (uint i = 0; i < num_probs; i++) {
     const double pp = probs[i];
-    if ((pp == pp) && pp >= 0) {  // if (std::isfinite(pp) && pp >= 0)
+    if (std::isfinite(pp) && pp >= 0) {
       total_prob += (fixed_probs[i] = pp);
     }
   }
