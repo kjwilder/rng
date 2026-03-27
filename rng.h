@@ -1,10 +1,12 @@
 #ifndef RNG_H_
 #define RNG_H_
 
+#include <atomic>
 #include <climits>
 #include <cmath>
 #include <cstdlib>
 #include <ctime>
+#include <mutex>
 #include <vector>
 
 namespace rng_h {
@@ -43,9 +45,28 @@ class RNG {
  private:
   ulong z, w, jsr, jcong;  // Seeds
 
-  static ulong tm;  // Used to ensure different RNGs have different seeds.
+  // Used to ensure different RNGs have different seeds (atomic for thread safety).
+  static std::atomic<ulong> tm;
   static ulong kn[128], ke[256];
   static double wn[128], fn[128], we[256], fe[256];
+
+  // Per-instance cached state for poisson() — avoids static-local corruption
+  // when multiple RNG instances are used.
+  struct PoissonState {
+    int l = 0, m = 0;
+    double b1 = 0, b2 = 0, c = 0, c0 = 0, c1 = 0, c2 = 0, c3 = 0;
+    double pp[36] = {}, p0 = 0, p = 0, q = 0, s = 0, d = 0, omega = 0;
+    double big_l = 0;
+    double muprev = 0.0, muprev2 = 0.0;
+  } poisson_state_;
+
+  // Per-instance cached state for binomial() — same rationale.
+  struct BinomialState {
+    double c = 0, fm = 0, npq = 0, p1 = 0, p2 = 0, p3 = 0, p4 = 0;
+    double qn = 0, xl = 0, xll = 0, xlr = 0, xm = 0, xr = 0;
+    double psave = -1.0;
+    int nsave = -1, m = 0;
+  } binomial_state_;
 
  public:
   RNG() { init(); zigset(); }
@@ -107,7 +128,7 @@ class RNG {
   void zigset();
 
   void init()
-    { z = w = jsr = jcong = ulong(time(0)) + tm; tm += 123457; }
+    { z = w = jsr = jcong = ulong(time(0)) + tm.fetch_add(123457); }
   void init(ulong z_, ulong w_, ulong jsr_, ulong jcong_ )
     { z = z_; w = w_; jsr = jsr_; jcong = jcong_; }
 
