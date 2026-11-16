@@ -1,23 +1,70 @@
-#include <cmath>
-#include <iostream>
 #include "rng.h"
 
+#include <climits>
+#include <cmath>
+#include <ctime>
+#include <limits>
+#include <mutex>
+#include <random>
+
 using rng_h::RNG;
-using rng_h::ulong;
+
+namespace {
+
+// One step of the SplitMix64 generator; used to spread a seed over the
+// four state words so that nearby seeds give unrelated sequences.
+uint64_t splitmix64(uint64_t* state) {
+  uint64_t x = (*state += 0x9e3779b97f4a7c15ull);
+  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
+  x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
+  return x ^ (x >> 31);
+}
+
+}  // namespace
 
 // _______________________________________________________________________
 // Initialize the static component of RNG
 
-ulong RNG::tm = 1234567;
-ulong RNG::kn[128], RNG::ke[256];
+std::atomic<uint64_t> RNG::tm{1234567};
+uint32_t RNG::kn[128], RNG::ke[256];
 double RNG::wn[128], RNG::fn[128], RNG::we[256], RNG::fe[256];
+
+// _______________________________________________________________________
+// Seeding
+
+void RNG::init() {
+  uint64_t seed = static_cast<uint64_t>(time(nullptr));
+  seed ^= tm.fetch_add(0x9e3779b97f4a7c15ull) << 1;
+  try {
+    std::random_device rd;
+    seed ^= (static_cast<uint64_t>(rd()) << 32) ^ rd();
+  } catch (...) {
+    // No entropy source: the clock and counter still give distinct seeds.
+  }
+  init(seed);
+}
+
+void RNG::init(uint64_t seed) {
+  const uint64_t a = splitmix64(&seed), b = splitmix64(&seed);
+  init(static_cast<uint32_t>(a), static_cast<uint32_t>(a >> 32),
+       static_cast<uint32_t>(b), static_cast<uint32_t>(b >> 32));
+}
+
+void RNG::init(uint32_t z_, uint32_t w_, uint32_t jsr_, uint32_t jcong_) {
+  // Each multiply-with-carry generator has two fixed points and the shift
+  // register generator is stuck at 0; avoid them.
+  z = (z_ == 0 || z_ == 0x9068ffffu) ? 362436069u : z_;
+  w = (w_ == 0 || w_ == 0x464fffffu) ? 521288629u : w_;
+  jsr = (jsr_ == 0) ? 123456789u : jsr_;
+  jcong = jcong_;
+}
 
 // _______________________________________________________________________
 // RNG::RNOR generates normal variates with rejection.
 // nfix() generates variates after rejection in RNOR.
 // Despite rejection, this method is faster than Box-Muller.
 
-double RNG::nfix(slong h, ulong i) {
+double RNG::nfix(int32_t h, uint32_t i) {
   const double r = 3.442620;  // The start of the right tail
 
   double x, y;
@@ -37,9 +84,10 @@ double RNG::nfix(slong h, ulong i) {
     }
 
     // start all over
-    h = UL32toSL32(rand_int32());
-    i = h & 127;
-    if (ULONG32(std::abs(h)) < kn[i]) {
+    const uint32_t u = rand_int32();
+    h = static_cast<int32_t>(u);
+    i = u & 127;
+    if (((h < 0) ? (0u - u) : u) < kn[i]) {
       return (h * wn[i]);
     }
   }
@@ -49,7 +97,7 @@ double RNG::nfix(slong h, ulong i) {
 // RNG::REXP generates exponential variates with rejection.
 // efix() generates variates after rejection in REXP.
 
-double RNG::efix(ulong j, ulong i) {
+double RNG::efix(uint32_t j, uint32_t i) {
   for (;;) {
     if (i == 0) {
       return (7.69711 - log(rand_open01()));
@@ -72,57 +120,57 @@ double RNG::efix(ulong j, ulong i) {
 // This procedure creates the tables used by RNOR and REXP
 
 void RNG::zigset() {
-  static bool inited = false;
-  if (inited) {
-    return;
-  }
-  inited = true;
+  static std::once_flag flag;
+  std::call_once(flag, []() {
+    // Set up tables for RNOR
+    const double m1 = 2147483648.0;  // 2^31
+    const double vn = 9.91256303526217e-3;
+    double tn = 3.442619855899;
+    double q = vn / exp(-.5 * tn * tn);
+    kn[0] = static_cast<uint32_t>((tn / q) * m1);
+    kn[1] = 0;
+    wn[0] = q / m1;
+    wn[127] = tn / m1;
+    fn[0] = 1.0;
+    fn[127] = exp(-.5 * tn * tn);
+    for (uint i = 126; i > 0; i--) {
+      const double dn = sqrt(-2 * log(vn / tn + exp(-.5 * tn * tn)));
+      kn[i + 1] = static_cast<uint32_t>((dn / tn) * m1);
+      fn[i] = exp(-.5 * dn * dn);
+      wn[i] = dn / m1;
+      tn = dn;
+    }
 
-  // Set up tables for RNOR
-  const double m1 = 2147483648.0;  // 2^31
-  const double vn = 9.91256303526217e-3;
-  double tn = 3.442619855899;
-  double q = vn / exp(-.5 * tn * tn);
-  kn[0] = ULONG32((tn / q) * m1);
-  kn[1] = 0;
-  wn[0] = q / m1;
-  wn[127] = tn / m1;
-  fn[0] = 1.0;
-  fn[127] = exp(-.5 * tn * tn);
-  for (uint i = 126; i > 0; i--) {
-    const double dn = sqrt(-2 * log(vn / tn + exp(-.5 * tn * tn)));
-    kn[i + 1] = ULONG32((dn / tn) * m1);
-    fn[i] = exp(-.5 * dn * dn);
-    wn[i] = dn / m1;
-    tn = dn;
-  }
-
-  // Set up tables for REXP
-  const double m2 = 4294967296.0;  // 2^32
-  const double ve = 3.949659822581572e-3;
-  double te = 7.697117470131487;
-  q = ve / exp(-te);
-  ke[0] = ULONG32((te / q) * m2);
-  ke[1] = 0;
-  we[0] = q / m2;
-  we[255] = te / m2;
-  fe[0] = 1.0;
-  fe[255] = exp(-te);
-  for (uint i = 254; i > 0; i--) {
-    const double de = -log(ve / te + exp(-te));
-    ke[i+1] = ULONG32((de / te) * m2);
-    fe[i] = exp(-de);
-    we[i] = de / m2;
-    te = de;
-  }
+    // Set up tables for REXP
+    const double m2 = 4294967296.0;  // 2^32
+    const double ve = 3.949659822581572e-3;
+    double te = 7.697117470131487;
+    q = ve / exp(-te);
+    ke[0] = static_cast<uint32_t>((te / q) * m2);
+    ke[1] = 0;
+    we[0] = q / m2;
+    we[255] = te / m2;
+    fe[0] = 1.0;
+    fe[255] = exp(-te);
+    for (uint i = 254; i > 0; i--) {
+      const double de = -log(ve / te + exp(-te));
+      ke[i + 1] = static_cast<uint32_t>((de / te) * m2);
+      fe[i] = exp(-de);
+      we[i] = de / m2;
+      te = de;
+    }
+  });
 }  // RNG::zigset
 
 // __________________________________________________________________________
-// Generate a gamma variate with parameters 'shape' and 'scale'
+// Generate a gamma variate with parameters 'shape' and 'rate'
 
-double RNG::gamma(double shape, double scale) {
+double RNG::gamma(double shape, double rate) {
+  if (!(shape > 0.0) || !(rate > 0.0)) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
   if (shape < 1.0) {
-    return gamma(shape + 1.0, scale) * pow(rand_open01(), 1.0 / shape);
+    return gamma(shape + 1.0, rate) * pow(rand_open01(), 1.0 / shape);
   }
 
   const double d = shape - 1.0 / 3.0;
@@ -137,10 +185,10 @@ double RNG::gamma(double shape, double scale) {
     const double u = rand_open01();
     const double x2 = x * x;
     if (u < 1.0 - 0.0331 * x2 * x2) {
-      return (d * v / scale);
+      return (d * v / rate);
     }
     if (log(u) < 0.5 * x2 + d * (1.0 - v + log(v))) {
-      return (d * v / scale);
+      return (d * v / rate);
     }
   }
 }  // RNG::gamma
@@ -159,19 +207,41 @@ int RNG::poisson(double mu) {
   const double fact[10] =
     { 1.0, 1.0, 2., 6., 24., 120.0, 720.0, 5040.0, 40320.0, 362880.0 };
 
-  static int l, m;
+  // Cached setup lives in the object, not in statics, so that separate
+  // RNG objects can be used from separate threads.
+  int& l = poisson_state_.l;
+  int& m = poisson_state_.m;
+  double& b1 = poisson_state_.b1;
+  double& b2 = poisson_state_.b2;
+  double& c = poisson_state_.c;
+  double& c0 = poisson_state_.c0;
+  double& c1 = poisson_state_.c1;
+  double& c2 = poisson_state_.c2;
+  double& c3 = poisson_state_.c3;
+  double* pp = poisson_state_.pp;
+  double& p0 = poisson_state_.p0;
+  double& p = poisson_state_.p;
+  double& q = poisson_state_.q;
+  double& s = poisson_state_.s;
+  double& d = poisson_state_.d;
+  double& omega = poisson_state_.omega;
+  double& big_l = poisson_state_.big_l;
+  double& muprev = poisson_state_.muprev;
+  double& muprev2 = poisson_state_.muprev2;
 
-  static double b1, b2, c, c0, c1, c2, c3;
-  static double pp[36], p0, p, q, s, d, omega;
-  static double big_l;/* integer "w/o overflow" */
-  static double muprev = 0.0, muprev2 = 0.0;/*, muold     = 0.0*/
-
-  double del, difmuk = 0.0, E = 0.0, fk = 0.0, fx, fy, g, px, py, t, u = 0.0, v, x;
+  double del, difmuk = 0.0, E = 0.0, fk = 0.0, fx, fy, g, px, py, t, u = 0.0;
+  double v, x;
   int pois = -1;
   int k, kflag, big_mu, new_big_mu = 0;
 
-  if (mu <= 0.0) {
+  if (!(mu > 0.0)) {  // Also catches NaN.
     return 0;
+  }
+  if (mu > 1e9) {
+    // The algorithm below would overflow an int.  At this size the normal
+    // approximation is excellent; clamp the result to the range of int.
+    const double y = floor(mu + sqrt(mu) * RNOR() + 0.5);
+    return (y >= INT_MAX) ? INT_MAX : static_cast<int>(y);
   }
 
   big_mu = mu >= 10.0;
@@ -301,14 +371,27 @@ Step_F:
 // ACM Algorithm 678 BTPEC converted to C.
 
 int RNG::binomial(double pp, int n) {
-  static double c, fm, npq, p1, p2, p3, p4, qn, xl, xll, xlr, xm, xr;
-
-  static double psave = -1.0;
-  static int nsave = -1, m = 0;
+  // Cached setup lives in the object, not in statics (see poisson()).
+  double& c = binomial_state_.c;
+  double& fm = binomial_state_.fm;
+  double& npq = binomial_state_.npq;
+  double& p1 = binomial_state_.p1;
+  double& p2 = binomial_state_.p2;
+  double& p3 = binomial_state_.p3;
+  double& p4 = binomial_state_.p4;
+  double& qn = binomial_state_.qn;
+  double& xl = binomial_state_.xl;
+  double& xll = binomial_state_.xll;
+  double& xlr = binomial_state_.xlr;
+  double& xm = binomial_state_.xm;
+  double& xr = binomial_state_.xr;
+  double& psave = binomial_state_.psave;
+  int& nsave = binomial_state_.nsave;
+  int& m = binomial_state_.m;
 
   double f, x;
 
-  if (n <= 0 || pp <= 0.0) {
+  if (n <= 0 || !(pp > 0.0)) {  // Also catches NaN.
     return 0;
   }
   if (pp >= 1.0) {
@@ -368,20 +451,23 @@ int RNG::binomial(double pp, int n) {
       ix = static_cast<int>(x);
     } else {
       if (u > p3) {
-        ix = static_cast<int>(xr - log(v) / xlr);
-        if (ix > n) {
+        x = xr - log(v) / xlr;
+        if (x >= n + 1.0) {  // Tested before the cast, which could overflow.
           continue;
         }
+        ix = static_cast<int>(x);
         v *= (u - p3) * xlr;
       } else {  // left tail
-        ix = static_cast<int>(xl + log(v) / xll);
-        if (ix < 0) {
+        x = xl + log(v) / xll;
+        if (x <= -1.0) {  // Tested before the cast, which could overflow.
           continue;
         }
+        ix = static_cast<int>(x);
         v *= (u - p2) * xll;
       }
     }
-    int k = std::abs(ix - m);
+    // k is a double: k * k overflows an int when n is very large.
+    const double k = std::abs(ix - m);
     if (k <= 20 || k >= npq / 2 - 1) {
       f = 1.0;
       if (m < ix) {
@@ -445,8 +531,8 @@ L_np_small:
   }
 
 finish:
-  if (psave > 0.5) {
-     ix = n - ix;
+  if (pp > 0.5) {
+    ix = n - ix;
   }
   return ix;
 }  // RNG::binomial
@@ -457,14 +543,13 @@ finish:
 
 void RNG::multinom(
     uint n, const std::vector<double>& probs, std::vector<uint>& samp) {
-  samp.resize(probs.size());
-  RNG::multinom(n, &probs[0], (uint) probs.size(), &samp[0]);
+  samp.assign(probs.size(), 0);
+  if (!probs.empty()) {
+    multinom(n, probs.data(), static_cast<uint>(probs.size()), samp.data());
+  }
 }
 
 void RNG::multinom(uint size, const double* probs, uint num_probs, uint* samp) {
-  if (num_probs == 0) {
-    return;
-  }
   for (uint i = 0; i < num_probs; i++) {
     samp[i] = 0;
   }
@@ -472,28 +557,31 @@ void RNG::multinom(uint size, const double* probs, uint num_probs, uint* samp) {
     return;
   }
 
-  std::vector<double> fixed_probs(num_probs);
+  // Negative and non-finite probabilities are treated as zero.
+  std::vector<double> fixed_probs(num_probs, 0.0);
   double total_prob = 0.0;
+  uint last = 0;  // The last category with positive probability.
   for (uint i = 0; i < num_probs; i++) {
     const double pp = probs[i];
-    if ((pp == pp) && pp >= 0) {  // if (std::isfinite(pp) && pp >= 0)
+    if (std::isfinite(pp) && pp > 0) {
       total_prob += (fixed_probs[i] = pp);
+      last = i;
     }
   }
 
-  if (total_prob == 0.0) {
+  if (!(total_prob > 0.0) || !std::isfinite(total_prob)) {
     return;
   }
 
-  for (uint i = 0; i < num_probs-1; i++) {
+  // Sample each category conditionally on the earlier ones.  Whatever is
+  // left goes to the last category with positive probability, so that
+  // rounding can never assign draws to a zero-probability category.
+  for (uint i = 0; i < last && size > 0; i++) {
     if (fixed_probs[i] > 0.0) {
       samp[i] = binomial(fixed_probs[i] / total_prob, size);
       size -= samp[i];
+      total_prob -= fixed_probs[i];
     }
-    if (size == 0) {
-      return;
-    }
-    total_prob -= fixed_probs[i];
   }
-  samp[num_probs - 1] = size;
+  samp[last] = size;
 }  // RNG::multinomial

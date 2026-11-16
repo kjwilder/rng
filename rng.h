@@ -1,132 +1,131 @@
 #ifndef RNG_H_
 #define RNG_H_
 
-#include <climits>
+#include <atomic>
 #include <cmath>
-#include <cstdlib>
-#include <ctime>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace rng_h {
 
-static const double PI   =  3.1415926535897932;
-static const double AD_l =  0.6931471805599453;
-static const double AD_a =  5.7133631526454228;
-static const double AD_b =  3.4142135623730950;
-static const double AD_c = -1.6734053240284925;
-static const double AD_p =  0.9802581434685472;
-static const double AD_A =  5.6005707569738080;
-static const double AD_B =  3.3468106480569850;
-static const double AD_H =  0.0026106723602095;
-static const double AD_D =  0.0857864376269050;
+constexpr double PI = 3.1415926535897932;
 
-typedef signed int sint;
 typedef unsigned int uint;
-typedef signed long slong;
-typedef unsigned long ulong;
-#if ULONG_MAX == 4294967295ul
-inline ulong ULONG32(slong x) { return (ulong(x)); }
-inline ulong ULONG32(ulong x) { return (ulong(x)); }
-inline ulong ULONG32(double x) { return (ulong(x)); }
-inline slong UL32toSL32(ulong x) { return (slong(x)); }
-#else
-inline ulong ULONG32(slong x) { return (ulong(x) & 0xfffffffful); }
-inline ulong ULONG32(ulong x) { return (x & 0xfffffffful); }
-inline ulong ULONG32(double x) { return (ulong(x) & 0xfffffffful); }
-inline slong UL32toSL32(ulong x) {
-  return (x < 0x80000000ul ?
-      slong(x) : -1 * (0x80000000ul - (x & 0x7ffffffful)));
-}
-#endif
 
+// A KISS ("Keep It Simple Stupid") random number generator, after
+// Marsaglia (1999), plus samplers for several common distributions.
+//
+// Thread safety: distinct RNG objects may be used concurrently from
+// different threads.  A single RNG object must not be shared between
+// threads without external synchronization.
 class RNG {
  private:
-  ulong z, w, jsr, jcong;  // Seeds
+  // Generator state.  All arithmetic is done on exactly 32 bits so that a
+  // given set of seeds yields the same sequence on every platform.
+  uint32_t z, w, jsr, jcong;
 
-  static ulong tm;  // Used to ensure different RNGs have different seeds.
-  static ulong kn[128], ke[256];
+  // Mixed into the seed of default-constructed RNGs so they all differ.
+  static std::atomic<uint64_t> tm;
+
+  // Ziggurat tables, filled once by zigset() and read-only afterwards.
+  static uint32_t kn[128], ke[256];
   static double wn[128], fn[128], we[256], fe[256];
 
- public:
-  RNG() { init(); zigset(); }
-  explicit RNG(ulong x_) :
-    z(x_), w(x_), jsr(x_), jcong(x_) { zigset(); }
-  RNG(ulong z_, ulong w_, ulong jsr_, ulong jcong_) :
-    z(z_), w(w_), jsr(jsr_), jcong(jcong_) { zigset(); }
-  ~RNG() { }
+  // Per-instance cached setup for poisson(), reused while mu is unchanged.
+  struct PoissonState {
+    int l = 0, m = 0;
+    double b1 = 0, b2 = 0, c = 0, c0 = 0, c1 = 0, c2 = 0, c3 = 0;
+    double pp[36] = {}, p0 = 0, p = 0, q = 0, s = 0, d = 0, omega = 0;
+    double big_l = 0;
+    double muprev = 0.0, muprev2 = 0.0;
+  } poisson_state_;
 
-#if ULONG_MAX == 4294967295ul
-  // 32 bit unsigned longs
-  ulong znew()
-    { return (z = 36969 * (z & 0xfffful) + (z >> 16)); }
-  ulong wnew()
-    { return (w = 18000 * (w & 0xfffful) + (w >> 16)); }
-  ulong MWC()
+  // Per-instance cached setup for binomial(), reused while (p, n) is
+  // unchanged.
+  struct BinomialState {
+    double c = 0, fm = 0, npq = 0, p1 = 0, p2 = 0, p3 = 0, p4 = 0;
+    double qn = 0, xl = 0, xll = 0, xlr = 0, xm = 0, xr = 0;
+    double psave = -1.0;
+    int nsave = -1, m = 0;
+  } binomial_state_;
+
+  double nfix(int32_t h, uint32_t i);
+  double efix(uint32_t j, uint32_t i);
+  static void zigset();
+
+ public:
+  // Seeds from the system entropy source, the clock and a global counter.
+  RNG() { zigset(); init(); }
+  // Seeds deterministically: equal seeds give equal sequences everywhere.
+  explicit RNG(uint64_t seed) { zigset(); init(seed); }
+  // Sets the four KISS state words directly.  Values for which a component
+  // generator would be stuck (e.g. 0) are replaced by fixed defaults.
+  RNG(uint32_t z_, uint32_t w_, uint32_t jsr_, uint32_t jcong_) {
+    zigset();
+    init(z_, w_, jsr_, jcong_);
+  }
+
+  void init();
+  void init(uint64_t seed);
+  void init(uint32_t z_, uint32_t w_, uint32_t jsr_, uint32_t jcong_);
+
+  // The component generators.  Each returns a value in [0,2^32-1].
+  uint32_t znew()
+    { return (z = 36969 * (z & 0xffffu) + (z >> 16)); }
+  uint32_t wnew()
+    { return (w = 18000 * (w & 0xffffu) + (w >> 16)); }
+  uint32_t MWC()
     { return ((znew() << 16) + wnew()); }
-  ulong SHR3()
-    { jsr ^= (jsr << 17); jsr ^= (jsr >> 13); return (jsr ^= (jsr << 5)); }
-  ulong CONG()
+  // Marsaglia's 1999 posting used the shifts (17, 13, 5), which do not give
+  // the full period; (13, 17, 5) is the corrected triple with period 2^32-1.
+  uint32_t SHR3()
+    { jsr ^= (jsr << 13); jsr ^= (jsr >> 17); return (jsr ^= (jsr << 5)); }
+  uint32_t CONG()
     { return (jcong = 69069 * jcong + 1234567); }
-  ulong rand_int32()       // [0,2^32-1]
+
+  uint32_t rand_int32()      // [0,2^32-1]
     { return ((MWC() ^ CONG()) + SHR3()); }
-  ulong rand_int()         // [0,2^32-1]
-    { return ((MWC() ^ CONG()) + SHR3()); }
-#elif ULONG_MAX == 18446744073709551615ul
-#ifdef RNG_C
-#warning "Compiling RNG class for 64-bit architecture"
-#endif
-  // 64-bit unsigned longs
-  // This is not as elegant and fast as it could be, but it works.
-  ulong znew()
-    { return (z = ((36969 * (z & 0xfffful) + (z >> 16)) & 0xfffffffful)); }
-  ulong wnew()
-    { return (w = ((18000 * (w & 0xfffful) + (w >> 16)) & 0xfffffffful)); }
-  ulong MWC()
-    { return (((znew() << 16) + wnew()) & 0xfffffffful); }
-  ulong SHR3()
-    { jsr ^= (jsr << 17); jsr ^= (jsr >> 13);
-      return (jsr = ((jsr ^= (jsr << 5)) & 0xfffffffful)); }
-  ulong CONG()
-    { return (jcong = ((69069 * jcong + 1234567) & 0xfffffffful)); }
-  ulong rand_int32()         // [0,2^32-1]
-    { return (((MWC() ^ CONG()) + SHR3()) & 0xfffffffful); }
-  ulong rand_int()           // [0,2^64-1]
-    { return (rand_int32() | (rand_int32() << 32)); }
-#endif
+  uint64_t rand_int() {      // [0,2^64-1]
+    const uint64_t lo = rand_int32();
+    return (lo | (static_cast<uint64_t>(rand_int32()) << 32));
+  }
+
+  // Standard normal and standard exponential variates (ziggurat method).
   double RNOR() {
-    slong h = UL32toSL32(rand_int32()), i = h & 127;
-    return (((ulong)std::abs(h) < kn[i]) ? h * wn[i] : nfix(h, i));
+    const uint32_t u = rand_int32();
+    const int32_t h = static_cast<int32_t>(u);
+    const uint32_t i = u & 127;
+    const uint32_t abs_h = (h < 0) ? (0u - u) : u;
+    return ((abs_h < kn[i]) ? h * wn[i] : nfix(h, i));
   }
   double REXP() {
-    ulong j = rand_int32(), i = j & 255;
+    const uint32_t j = rand_int32(), i = j & 255;
     return ((j < ke[i]) ? j * we[i] : efix(j, i));
   }
 
-  double nfix(slong h, ulong i);
-  double efix(ulong j, ulong i);
-  void zigset();
-
-  void init()
-    { z = w = jsr = jcong = ulong(time(0)) + tm; tm += 123457; }
-  void init(ulong z_, ulong w_, ulong jsr_, ulong jcong_ )
-    { z = z_; w = w_; jsr = jsr_; jcong = jcong_; }
-
   // For a faster but lower quality RNG, uncomment the following
-  // line, and comment out the original definition of rand_int above.
+  // line, and comment out the original definition of rand_int32 above.
   // In practice, the faster RNG is fine for simulations
   // that do not simulate more than a few billion random numbers.
-  // ulong rand_int() { return SHR3(); }
-  long rand_int31()           // [0,2^31-1]
-    { return (static_cast<long>(rand_int32()) >> 1);}
+  // uint32_t rand_int32() { return SHR3(); }
+  int32_t rand_int31()        // [0,2^31-1]
+    { return static_cast<int32_t>(rand_int32() >> 1); }
+  // The uniform generators below use the top 52 or 53 bits of rand_int(),
+  // so every value is exactly representable and the stated endpoints are
+  // honoured (no rounding up to 1.0 or down to 0.0).
   double rand_closed01()      // [0,1]
-    { return (static_cast<double>(rand_int()) /
-        static_cast<double>(ULONG_MAX)); }
+    { return (static_cast<double>(rand_int() >> 11) / 9007199254740991.0); }
   double rand_open01()        // (0,1)
-    { return ((static_cast<double>(rand_int()) + 1.0) / (ULONG_MAX + 2.0)); }
+    { return ((static_cast<double>(rand_int() >> 12) + 0.5) *
+        (1.0 / 4503599627370496.0)); }
   double rand_halfclosed01()  // [0,1)
-    { return (static_cast<double>(rand_int()) / (ULONG_MAX + 1.0)); }
+    { return (static_cast<double>(rand_int() >> 11) *
+        (1.0 / 9007199254740992.0)); }
   double rand_halfopen01()    // (0,1]
-    { return ((static_cast<double>(rand_int()) + 1.0) / (ULONG_MAX + 1.0)); }
+    { return ((static_cast<double>(rand_int() >> 11) + 1.0) *
+        (1.0 / 9007199254740992.0)); }
 
   // Continuous Distributions
   double uniform(double x = 0.0, double y = 1.0)
@@ -135,7 +134,9 @@ class RNG {
     { return RNOR() * sd + mu; }
   double exponential(double lambda = 1)
     { return REXP() / lambda; }
-  double gamma(double shape = 1, double scale = 1);
+  // Note: the second parameter is a rate (inverse scale); the mean is
+  // shape / rate.  Returns NaN unless shape > 0 and rate > 0.
+  double gamma(double shape = 1, double rate = 1);
   double chi_square(double df)
     { return gamma(df / 2.0, 0.5); }
   double beta(double a1, double a2)
@@ -164,9 +165,9 @@ class RNG {
     exponential(&res, lambda);
     return res;
   }
-  void gamma(std::vector<double>* res, double shape = 1, double scale = 1) {
+  void gamma(std::vector<double>* res, double shape = 1, double rate = 1) {
     for (auto i = res->begin(); i != res->end(); ++i)
-      *i = gamma(shape, scale);
+      *i = gamma(shape, rate);
   }
   void chi_square(std::vector<double>* res, double df) {
     for (auto i = res->begin(); i != res->end(); ++i)
@@ -178,6 +179,9 @@ class RNG {
   }
 
   // Discrete Distributions
+  // poisson() returns 0 unless mu > 0.  binomial() returns 0 unless p > 0
+  // and n > 0.  multinom() ignores negative and non-finite probabilities,
+  // normalizes the rest, and requires n <= INT_MAX.
   int poisson(double mu);
   int binomial(double p, int n);
   void multinom(unsigned int n, const std::vector<double>& probs,

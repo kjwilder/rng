@@ -22,11 +22,17 @@ A C++ Random Number Generator Class
   commonly used tests for randomness.  It does not have the ultra-long
   period of some other generators, but that is a "problem" that can be
   fixed easily.  The period is about 2^123.
+- The generator state is four 32-bit words and all arithmetic is done
+  on exactly 32 bits, so a given seed produces the same sequence on
+  every platform.  One deliberate departure from Marsaglia's posting:
+  the shift-register component uses the shifts (13, 17, 5) rather than
+  the posted (17, 13, 5), which does not have the full period of
+  2^32 - 1.
 - The KISS algorithm is only used directly in the function
   `rand_int32`.  `rand_int32` is then used (directly or indirectly) by
   every other function that generates random numbers.  For faster
   random numbers, one can redefine `rand_int32` to return either
-  WMC(), CONG(), or SHR3().  The speed will be two to three times
+  MWC(), CONG(), or SHR3().  The speed will be two to three times
   faster, and the quality of the random numbers should be sufficient
   for many purposes.  The three alternatives are comparable to each
   other in terms of both speed and quality.
@@ -39,13 +45,27 @@ A C++ Random Number Generator Class
   Transactions on Mathematical Software, Vol. 26, No 3, Sep 2000,
   pages 363-372.
 
+## Seeding
+- `RNG x;` seeds from the system entropy source, the clock and a
+  global counter, so every default-constructed generator is different.
+- `RNG x(seed);` is deterministic: the 64-bit seed is hashed into the
+  four state words, so nearby seeds give unrelated sequences.
+- `RNG x(z, w, jsr, jcong);` sets the four state words directly.
+  Values that would leave a component generator stuck (such as 0) are
+  replaced by fixed defaults.
+
+## Parameters
+- `gamma(shape, rate)` takes a *rate* (inverse scale): the mean is
+  `shape / rate`.  `exponential(lambda)` likewise has mean `1 / lambda`.
+- Invalid parameters do not hang or crash: `gamma` returns NaN, and
+  `poisson` and `binomial` return 0.  `poisson` results are capped at
+  `INT_MAX`.
+
 ## Warnings
-- My original intent was to use a single instance of a random number
-  generator class on a platform with 32 bit ints. I made some effort
-  to support 64 bit ints and multiple instances of the class, but they
-  are not well tested and may have issues.
-- This class has a potential race condition if used in a multi-threaded
-  application. This can result in suspect random samples.
+- Separate `RNG` objects can be used from separate threads.  A single
+  `RNG` object must not be shared between threads without a lock.
+- This is not a cryptographic generator.  Do not use it for anything
+  security related.
 - It is best NOT to use the generator as in the following line:
   ```
   for (int i = 0; i < 100; ++i) { RNG x; cout << x.uniform() << endl; }
@@ -61,4 +81,15 @@ A C++ Random Number Generator Class
 
 ## Usage
 - Include the header file `rng.h`
-- Link C++ code with `rng.cc`
+- Link C++ code with `rng.cc` (C++11 or later)
+  ```
+  #include "rng.h"
+
+  rng_h::RNG x(12345);
+  double u = x.uniform();          // [0, 1]
+  double n = x.normal(10.0, 2.0);  // mean 10, standard deviation 2
+  int k = x.poisson(3.5);
+  ```
+
+## Tests
+- `bazel test :all`
